@@ -3,7 +3,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3_image/SDL_image.h>
 #include <SDL3_ttf/SDL_ttf.h>
-#include <SDL3_gfx/SDL3_gfxPrimitives.h>
+#include <box2d/box2d.h>
 #include <stdio.h>
 
 #include "polygon.h"
@@ -11,29 +11,22 @@
 SDL_Renderer* gRenderer = NULL;
 
 
-
 void render_polygon(Polygon* poly, SDL_Color color) {
-    Sint16* vx = alloca(poly->count * sizeof(Sint16));
-    Sint16* vy = alloca(poly->count * sizeof(Sint16));
-
-    for (int i = 0; i < poly->count; ++i) {
-        vx[i] = poly->points[i].x;
-        vy[i] = poly->points[i].y;
-    }
-
-    filledPolygonRGBA(gRenderer, vx, vy, poly->count, color.r, color.g, color.b, color.a);
-    return;
-
     SDL_assert(poly->count >= 3);
     SDL_Vertex* verts = alloca(poly->count * sizeof(SDL_Vertex));
     int* indicies = alloca(3 * (poly->count - 2) * sizeof(int));
 
+    b2Transform t = b2Body_GetTransform(poly->body);
+
     for (uint32_t ix = 0; ix < poly->count; ++ix) {
-        verts[ix].color.r = color.r / 255.0;
-        verts[ix].color.g = color.g / 255.0;
-        verts[ix].color.b = color.b / 255.0;
-        verts[ix].color.a = color.a / 255.0;
-        verts[ix].position = poly->points[ix];
+        verts[ix].color.r = color.r / 255.0f;
+        verts[ix].color.g = color.g / 255.0f;
+        verts[ix].color.b = color.b / 255.0f;
+        verts[ix].color.a = color.a / 255.0f;
+
+        b2Vec2 v = b2TransformPoint(t, poly->points[ix]);
+        verts[ix].position.x = v.x * 10.0f;
+        verts[ix].position.y = v.y * 10.0f;
     }
 
     for (uint32_t ix = 1; ix < poly->count - 1; ++ix) {
@@ -42,9 +35,69 @@ void render_polygon(Polygon* poly, SDL_Color color) {
         indicies[(ix - 1) * 3 + 2] = ix + 1;
     }
     SDL_RenderGeometry(gRenderer, NULL, verts, poly->count, indicies, 3 * (poly->count - 2));
-    return;
 }
 
+void create_bounds(b2WorldId world) {
+    b2BodyDef groundBodyDef = b2DefaultBodyDef();
+    groundBodyDef.type = b2_staticBody;
+    groundBodyDef.position = (b2Vec2){40.0f, 40.0f};
+    b2BodyId groundId = b2CreateBody(world, &groundBodyDef);
+
+    b2Polygon groundBox = b2MakeBox(40.0f, 5.0f);
+    for (int i = 0; i < groundBox.count; ++i) {
+        groundBox.vertices[i].y += 45.0f;
+    }
+    b2ShapeDef groundShapeDef = b2DefaultShapeDef();
+    groundShapeDef.material.restitution = 0.9f;
+    b2CreatePolygonShape(groundId, &groundShapeDef, &groundBox);
+
+    groundBox = b2MakeBox(40.0f, 5.0f);
+    for (int i = 0; i < groundBox.count; ++i) {
+        groundBox.vertices[i].y -= 45.0f;
+    }
+    groundShapeDef = b2DefaultShapeDef();
+    groundShapeDef.material.restitution = 0.9f;
+    b2CreatePolygonShape(groundId, &groundShapeDef, &groundBox);
+
+    groundBox = b2MakeBox(5.0f, 40.0f);
+    for (int i = 0; i < groundBox.count; ++i) {
+        groundBox.vertices[i].x += 45.0f;
+    }
+    groundShapeDef = b2DefaultShapeDef();
+    groundShapeDef.material.restitution = 0.9f;
+    b2CreatePolygonShape(groundId, &groundShapeDef, &groundBox);
+
+    groundBox = b2MakeBox(5.0f, 40.0f);
+    for (int i = 0; i < groundBox.count; ++i) {
+        groundBox.vertices[i].x -= 45.0f;
+    }
+    groundShapeDef = b2DefaultShapeDef();
+    groundShapeDef.material.restitution = 0.9f;
+    b2CreatePolygonShape(groundId, &groundShapeDef, &groundBox);
+}
+
+void draw_solid_polygon(b2Transform t, const b2Vec2* vertices, int count, float radius, b2HexColor color, void* context ) {
+    SDL_Vertex* verts = alloca(count * sizeof(SDL_Vertex));
+    int* indicies = alloca(3 * (count - 2) * sizeof(int));
+
+    for (uint32_t ix = 0; ix < count; ++ix) {
+        verts[ix].color.r = 230 / 255.0f;
+        verts[ix].color.g = 110 / 255.0f;
+        verts[ix].color.b = 110 / 255.0f;
+        verts[ix].color.a = 255 / 255.0f;
+
+        b2Vec2 v = b2TransformPoint(t, vertices[ix]);
+        verts[ix].position.x = v.x * 10.0f;
+        verts[ix].position.y = v.y * 10.0f;
+    }
+
+    for (uint32_t ix = 1; ix < count - 1; ++ix) {
+        indicies[(ix - 1) * 3] = 0;
+        indicies[(ix - 1) * 3 + 1] = ix;
+        indicies[(ix - 1) * 3 + 2] = ix + 1;
+    }
+    SDL_RenderGeometry(gRenderer, NULL, verts, count, indicies, 3 * (count - 2));
+}
 
 int main() {
     SDL_Init(SDL_INIT_VIDEO);
@@ -57,28 +110,34 @@ int main() {
         SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Failed creating window: %s\n", SDL_GetError());
     }
 
+    b2WorldDef worldDef = b2DefaultWorldDef();
+    worldDef.gravity.y = 0.0f;
+    b2WorldId world = b2CreateWorld(&worldDef);
+    create_bounds(world);
+    b2DebugDraw draw = b2DefaultDebugDraw();
+    draw.drawShapes = true;
+    draw.DrawSolidPolygonFcn = draw_solid_polygon;
+
     gRenderer = renderer;
 
     bool running = true;
 
-    SDL_FPoint points[5] = {{10.0f, 10.0f}, {10.0f, 200.0f}, {200.0f, 290.0f}, {450.0f, 100.0f}, {200.0f, 25.0f}};
-    Polygon* poly = Polygon_create(points, 5);
-    Polygon_move(poly, 100, 50);
 
-    Polygon** polygons = SDL_malloc(400 * sizeof(Polygon*));
+    b2Vec2 points[5] = {{1.0f, 1.0f}, {1.0f, 20.0f}, {20.0f, 29.0f}, {45.0f, 10.0f}, {20.0f, 2.5f}};
+    b2Transform t = {{60.0f, 60.0f}, {-1.0f, 0.0f}};
+    Polygon* poly = Polygon_create(world, points, 5, t);
+
+    b2Vec2 points2[4] = {{40.0f, 20.0f}, {20.0f, 29.0f}, {35.0f, 10.0f}, {20.0f, 2.5f}};
+    t.p.x += 20.0f;
+    t.p.y -= 25.0f;
+
+    Polygon** polygons = SDL_malloc(200 * sizeof(Polygon*));
+    int poly_count = 2;
     polygons[0] = poly;
-    int poly_count = 1;
-
-
-    SDL_FPoint points2[4] = {{10.0f, 200.0f}, {200.0f, 290.0f}, {450.0f, 100.0f}, {200.0f, 25.0f}};
-    poly = Polygon_create(points2, 4);
-    Polygon_move(poly, 0, 300);
+    poly = Polygon_create(world, points2, 4, t);
     polygons[1] = poly;
-    ++poly_count;
 
-    Polygon* a, *b;
-    SDL_FPoint p1 = {0.0, 0.0}, p2 = {500.0f, 600.0f};
-    
+
     uint64_t stamp = SDL_GetTicks();
 
     double line_rot = 1.2;
@@ -103,11 +162,6 @@ int main() {
                     break;
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
                     if (e.button.button == SDL_BUTTON_LEFT) {
-                        SDL_FPoint pos, delta, norm;
-                        if (Polygon_collision(polygons[0], polygons[1], &pos, &delta, &norm)) {
-                            printf("Collision: (%f, %f), (%f, %f), (%f, %f)\n", pos.x, pos.y, delta.x, delta.y, norm.x, norm.y);
-                        }
-
                         uint64_t now = SDL_GetTicks();
                         if (now - last_click > 1000) {
                             last_click = now;
@@ -122,14 +176,8 @@ int main() {
         double delta = (now - stamp) / 1000.0;
         stamp = now;
 
-        for (int i = 0; i < poly_count; ++i) {
-            //Polygon_rotate(polygons[i], delta);
-            Polygon_move(polygons[i], polygons[i]->vx * delta, polygons[i]->vy * delta);
-            Polygon_rotate(polygons[i], polygons[i]->vrot * delta);
-        }
-
         float mx, my;
-        SDL_MouseButtonFlags mbutton = SDL_GetMouseState(&mx, &my);
+        SDL_GetMouseState(&mx, &my);
         if (mx < 0) {
             mx = 0;
         } else if (mx > 800) {
@@ -140,17 +188,20 @@ int main() {
         } else if (my > 800) {
             my = 800;
         }
+        b2Vec2 p1, p2;
 
         p1.x = mx - 1200;
         p2.x = mx + 1200;
         p1.y = my;
         p2.y = my;
 
-        //Polygon_move(polygons[0], mx - polygons[0]->center.x, my - polygons[0]->center.y);
-
-        SDL_FPoint center = {mx, my};
+        b2Vec2 center = {mx, my};
         p1 = rotated(p1, line_rot, center);
         p2 = rotated(p2, line_rot, center);
+        p1.x = p1.x / 10.0f;
+        p1.y = p1.y / 10.0f;
+        p2.x = p2.x / 10.0f;
+        p2.y = p2.y / 10.0f;
 
         if (click) {
             click = false;
@@ -158,8 +209,7 @@ int main() {
             uint32_t cur_poly_count = poly_count;
             for (uint32_t ix = 0; ix < cur_poly_count; ++ix) {
                 Polygon* a, *b;
-                if (Polygon_split(polygons[ix], p1, p2, &a, &b)) {
-                    Polygon_free(polygons[ix]);
+                if (Polygon_split(polygons[ix], world, p1, p2, &a, &b)) {
                     polygons[ix] = a;
                     polygons[poly_count] = b;
                     ++poly_count;
@@ -167,33 +217,18 @@ int main() {
                 }
             }
 
-            for (uint32_t ix = 0; ix < poly_count; ++ix) {
-                if (polygons[ix]->mass < 100) {
-                    Polygon_free(polygons[ix]);
+            for (uint32_t ix = 0; ix < poly_count;) {
+                if (polygons[ix] == NULL) {
                     polygons[ix] = polygons[poly_count - 1];
                     --poly_count;
-                    --ix;
+                } else {
+                    ++ix;
                 }
             }
         }
 
 
         bool collision = false;
-
-        for (int i = 0; i < poly_count; ++i) {
-            for (int j = i + 1; j < poly_count; ++j) {
-                SDL_FPoint col, delta, norm;
-                if (Polygon_collision(polygons[i], polygons[j], &col, &delta, &norm)) {
-                    collision = true;
-                    printf("Collision\n");
-                    Polygon_solve_collision(polygons[i], polygons[j], col, delta, norm);
-                }
-            }
-        }
-
-        for (int i = 0; i < poly_count; ++i) {
-            Polygon_resolve_walls(polygons[i], 800, 800);
-        }
 
 
         SDL_SetRenderDrawColor(gRenderer, 0x10, 0x10, 0x10, 0xff);
@@ -204,15 +239,19 @@ int main() {
         if (collision) {
             color.b = 200;
         }
+
+        b2World_Step(world, delta, 4);
+
         for (int i = 0; i < poly_count; ++i) {
+            color.r += 10;
+            color.b += 25;
             render_polygon(polygons[i], color);
-            color.r += 40;
         }
         
-
+        //b2World_Draw(world, &draw);
         
         SDL_SetRenderDrawColor(gRenderer, 0x80, 0x10, 0x10, 0xff);
-        SDL_RenderLine(gRenderer, p1.x, p1.y, p2.x, p2.y);
+        SDL_RenderLine(gRenderer, p1.x * 10.0f, p1.y * 10.0f, p2.x * 10.0f, p2.y * 10.0f);
         
 
 
@@ -220,6 +259,8 @@ int main() {
 
         SDL_RenderPresent(renderer);
     }
+
+    b2DestroyWorld(world);
     
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);

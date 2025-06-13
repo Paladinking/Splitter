@@ -1,44 +1,8 @@
 #include "polygon.h"
 #include <stdio.h>
+#include <math.h>
 
-    /*pub fn get_collision(&self, other: &Polygon) -> Option<(Point, Point, Point)> {
-        if let Some(res) = self.check_collision(other) {
-            return Some(res);
-        }
-        if let Some((col, offset, normal)) = other.check_collision(self) {
-            return Some((col, -offset, normal));
-        }
-        return None;
-    }*/
-    
-    /*
-        for p in &other.points {
-            if self.contains_point(*p) {
-                let centre = other.centre;
-                if let Some((col, normal)) = self.get_intersect(*p, centre) {
-                    return Some((col, col -*p, normal));
-                } else {
-                    return None;
-                }
-            }
-        }
-        return None;
-
-     * */
-
-float area(const SDL_FPoint* point, int n)  {
-    float sum = 0.0f;
-    SDL_FPoint start = point[n -1];
-    for (int i = 0; i < n; ++i) {
-        SDL_FPoint end = point[i];
-            sum += start.x * end.y - start.y * end.x;
-        start = end;
-    }
-    return 0.5 * SDL_abs(sum);
-}
-
-
-bool line_intersects(SDL_FPoint pa1, SDL_FPoint pa2, SDL_FPoint pb1, SDL_FPoint pb2, SDL_FPoint* intersect) {
+bool line_intersects(b2Vec2 pa1, b2Vec2 pa2, b2Vec2 pb1, b2Vec2 pb2, b2Vec2* intersect) {
     double denom = (pa1.x - pa2.x) * (pb1.y - pb2.y) - (pa1.y - pa2.y) * (pb1.x - pb2.x);
     if (denom == 0.0) {
         return false;
@@ -54,7 +18,146 @@ bool line_intersects(SDL_FPoint pa1, SDL_FPoint pa2, SDL_FPoint pb1, SDL_FPoint 
     return false;
 }
 
-bool contains_point(Polygon* poly, SDL_FPoint p) {
+bool point_eq(b2Vec2 p1, b2Vec2 p2) {
+    return b2AbsFloat(p1.x - p2.x) + b2AbsFloat(p1.y - p2.y) < 0.01;
+}
+
+
+// Split polygon by line from p1 to p2
+bool Polygon_split(Polygon* p, b2WorldId world, b2Vec2 p1, b2Vec2 p2, Polygon** a, Polygon** b) {
+    b2Transform t = b2Body_GetTransform(p->body);
+    p1 = b2InvTransformPoint(t, p1);
+    p2 = b2InvTransformPoint(t, p2);
+
+    b2Vec2 start = p->points[p->count - 1];
+    for (int i = 0; i < p->count; ++i) {
+        b2Vec2 end = p->points[i];
+        b2Vec2 intersect;
+        if (line_intersects(start, end, p1, p2, &intersect)) {
+            b2Vec2 start2 = end;
+            for (int j = i + 1; j < p->count; ++j) {
+                b2Vec2 end2 = p->points[j];
+                b2Vec2 intersect2;
+                if (line_intersects(start2, end2, p1, p2, &intersect2)) {
+                    if (point_eq(intersect, intersect2)) {
+                        // Intersects were found in shared corner of two lines, keep looking
+                        start2 = end2;
+                        continue;
+                    }
+                    int l1 = i + p->count - j + 2;
+                    int l2 = j - i + 2;
+
+                    b2Vec2* v = alloca(l1 * sizeof(b2Vec2));
+                    b2Vec2* v2 = alloca(l2 * sizeof(b2Vec2));
+
+                    v2[0] = intersect;
+                    for (int ix = 0; ix < i; ++ix) {
+                        v[ix] = p->points[ix];
+                    }
+                    for (int ix = i; ix < j; ++ix) {
+                        v2[ix - i + 1] = p->points[ix];
+                    }
+                    v2[j - i + 1] = intersect2; 
+                    v[i] = intersect;
+                    v[i + 1] = intersect2;
+                    for (int ix = j; ix < p->count; ++ix) {
+                        v[i + ix + 2 - j] = p->points[ix];
+                    }
+
+                    Polygon_free(p);
+
+                    *b = Polygon_create(world, v2, l2, t);
+                    *a = Polygon_create(world, v, l1, t);
+                    if (*a == NULL || *b == NULL) {
+                        return true;
+                    }
+
+                    b2Vec2 aPos = b2Body_GetPosition((*a)->body);
+                    b2Vec2 bPos = b2Body_GetPosition((*b)->body);
+
+                    b2Vec2 diff = {aPos.x - bPos.x, aPos.y - bPos.y};
+                    diff = b2Normalize(diff);
+
+                    const float FORCE_VAL = 10 * 50000.0f;
+                    
+                    b2Vec2 aForce = {diff.x * FORCE_VAL, diff.y * FORCE_VAL};
+                    b2Vec2 bForce = {diff.x * -FORCE_VAL, diff.y * -FORCE_VAL};
+                    b2Body_ApplyForceToCenter((*a)->body, aForce, true);
+                    b2Body_ApplyForceToCenter((*b)->body, bForce, true);
+                    return true;
+                }
+                start2 = end2;
+            }
+
+        }
+        start = end;
+    }
+    return false;
+}
+
+
+Polygon* Polygon_create(b2WorldId world, const b2Vec2* points, int n_points, b2Transform t) {
+    b2Hull hull = b2ComputeHull(points, n_points);
+    if (hull.count == 0) {
+        return NULL;
+    }
+
+    b2Polygon dynPoly = b2MakePolygon(&hull, 0.0f);
+    b2MassData mass = b2ComputePolygonMass(&dynPoly, 1.0f);
+    if (mass.mass < 10.0f) {
+        return NULL;
+    }
+
+    Polygon* poly = SDL_malloc(sizeof(Polygon) + n_points * sizeof(b2Vec2));
+    SDL_assert_release(poly != NULL);
+
+    for (int i = 0; i < n_points; ++i) {
+        dynPoly.vertices[i].x -= mass.center.x;
+        dynPoly.vertices[i].y -= mass.center.y;
+    }
+
+    SDL_memcpy(poly->points, dynPoly.vertices, n_points * sizeof(b2Vec2));
+    poly->count = n_points;
+
+    b2BodyDef bodyDef = b2DefaultBodyDef();
+    bodyDef.type = b2_dynamicBody;
+    bodyDef.position = t.p;
+    b2Vec2 center = b2RotateVector(t.q, mass.center);
+    bodyDef.position.x += center.x;
+    bodyDef.position.y += center.y;
+    bodyDef.rotation = t.q;
+    b2BodyId body = b2CreateBody(world, &bodyDef);
+
+    b2ShapeDef shapeDef = b2DefaultShapeDef();
+    shapeDef.density = 1.0f;
+
+    b2CreatePolygonShape(body, &shapeDef, &dynPoly);
+    poly->body = body;
+
+    return poly;
+}
+
+void Polygon_free(Polygon* p) {
+    b2DestroyBody(p->body);
+
+    SDL_free(p);
+}
+
+
+float area(const SDL_FPoint* point, int n)  {
+    float sum = 0.0f;
+    SDL_FPoint start = point[n -1];
+    for (int i = 0; i < n; ++i) {
+        SDL_FPoint end = point[i];
+            sum += start.x * end.y - start.y * end.x;
+        start = end;
+    }
+    return 0.5 * SDL_abs(sum);
+}
+
+
+
+/*bool contains_point(Polygon* poly, SDL_FPoint p) {
     if (poly->count < 3) {
         return false;
     }
@@ -91,68 +194,60 @@ SDL_FPoint normalized(SDL_FPoint p) {
     return p;
 }
 
-// point and normal
-// p2 should be iside, p1 outside
-bool get_intersect(Polygon* p, SDL_FPoint p1, SDL_FPoint p2, SDL_FPoint* point, SDL_FPoint* normal) {
-    SDL_FPoint p3 = p->points[p->count - 1];
+
+
+struct PolygonProjection {
+    float low;
+    float high;
+};
+
+struct PolygonProjection project_poly(Polygon* p, SDL_FPoint normal) {
+    float low = INFINITY;
+    float high = -INFINITY;
+
     for (int i = 0; i < p->count; ++i) {
-        SDL_FPoint p4 = p->points[i];
-        if (line_intersects(p1, p2, p3, p4, point)) {
-            float dx = p4.x - p3.x;
-            float dy = p4.y - p3.y;
-            SDL_FPoint rotated = {-dy, dx};
-            SDL_FPoint out = {p1.x - point->x, p1.y - point->y};
-        
-            float scale = dot_prod(rotated, out) / dot_prod(rotated, rotated);
-
-            normal->x = scale * rotated.x;
-            normal->y = scale * rotated.y;
-            *normal = normalized(*normal);
-
-            return true;
+        float d = dot_prod(normal, p->points[i]);
+        if (d > high) {
+            high = d;
         }
-        p3 = p4;
+        if (d < low) {
+            low = d;
+        }
     }
-    return false;
+    struct PolygonProjection proj = {low, high};
+    return proj;
 }
 
+bool check_collision2(Polygon* a, Polygon* b, SDL_FPoint* normal, float* min_penetration) {
+    SDL_FPoint start = a->points[a->count - 1];
+    for (int i = 0; i < a->count; ++i) {
+        SDL_FPoint end = a->points[i];
+        SDL_FPoint delta = {end.x - start.x, end.y - start.y};
+        delta = normalized(delta);
+        SDL_FPoint normal = {-delta.y, delta.x};
+        struct PolygonProjection proj_a = project_poly(a, normal);
+        struct PolygonProjection proj_b = project_poly(b, normal);   
 
-bool check_collision(Polygon* a, Polygon* b, SDL_FPoint* colp, SDL_FPoint* delta, SDL_FPoint* normal) {
-    for (int i = 0; i < b->count; ++i) {
-        if (contains_point(a, b->points[i])) {
-            SDL_FPoint center = b->center;
-            if (get_intersect(a, b->points[i], center, colp, normal)) {
-                delta->x = colp->x - b->points[i].x;
-                delta->y = colp->y - b->points[i].y;
-                return true;
-            }
-            return false;
+        if (proj_a.high > proj_b.low && proj_b.high > proj_a.low) {
+
+            start = end;
+            continue;
         }
-
-    }
-    return false;
-}
-
-bool Polygon_collision(Polygon* a, Polygon* b, SDL_FPoint* colp, SDL_FPoint* delta, SDL_FPoint* normal) {
-    float dx = a->center.x - b->center.x;
-    float dy = a->center.y - b->center.y;
-    float rad = a->radius + b->radius;
-    if (dx * dx + dy * dy > rad * rad) {
         return false;
+
     }
-    if (check_collision(a, b, colp, delta, normal)) {
-        delta->x = -delta->x;
-        delta->y = -delta->y;
-        return true;
-    }
-    if (check_collision(b, a, colp, delta, normal)) {
-        return true;
-    }
-    return false;
+    return true;
 }
 
 
-void Polygon_solve_collision(Polygon *a, Polygon* b, SDL_FPoint p, SDL_FPoint shift, SDL_FPoint normal) {
+bool Polygon_collision2(Polygon* a, Polygon* b, SDL_FPoint* colp, SDL_FPoint* delta, SDL_FPoint* normal) {
+    float min_penetration = 99999999999999.0f;
+    return check_collision2(a, b, normal, &min_penetration) && check_collision2(b, a, normal, &min_penetration);
+}*/
+
+
+
+/*void Polygon_solve_collision(Polygon *a, Polygon* b, SDL_FPoint p, SDL_FPoint shift, SDL_FPoint normal) {
     const double ELASTICITY = 0.5;
     Polygon_move(a, shift.x / 2.0, shift.y / 2.0);
     Polygon_move(b, -shift.x / 2.0, -shift.y / 2.0);
@@ -188,7 +283,6 @@ void Polygon_solve_collision(Polygon *a, Polygon* b, SDL_FPoint p, SDL_FPoint sh
     b->vx = vel_b.x;
     b->vy = vel_b.y;
 }
-/*
         const ELASTICITY: f64 = 0.5;
 
         self.shape.shift(shift.x, shift.y);
@@ -217,77 +311,16 @@ void Polygon_solve_collision(Polygon *a, Polygon* b, SDL_FPoint p, SDL_FPoint sh
 
         other.rot = other.rot - j * rb_x_n / other.inertia;
         other.dx = vel_b.x;
-        other.dy = vel_b.y;*/
+        other.dy = vel_b.y;
 
 
 
 
-bool point_eq(SDL_FPoint p1, SDL_FPoint p2) {
-    return SDL_abs(p1.x - p2.x) + SDL_abs(p1.y - p2.y) < 0.01;
-}
 
+*/
 
-// Split polygon by line from p1 to p2
-bool Polygon_split(Polygon* p, SDL_FPoint p1, SDL_FPoint p2, Polygon** a, Polygon** b) {
-    SDL_FPoint start = p->points[p->count - 1];
-    for (int i = 0; i < p->count; ++i) {
-        SDL_FPoint end = p->points[i];
-        SDL_FPoint intersect;
-        if (line_intersects(start, end, p1, p2, &intersect)) {
-            SDL_FPoint start2 = end;
-            for (int j = i + 1; j < p->count; ++j) {
-                SDL_FPoint end2 = p->points[j];
-                SDL_FPoint intersect2;
-                if (line_intersects(start2, end2, p1, p2, &intersect2)) {
-                    if (point_eq(intersect, intersect2)) {
-                        // Intersects were found in shared corner of two lines, keep looking
-                        start2 = end2;
-                        continue;
-                    }
-                    int l1 = i + p->count - j + 2;
-                    int l2 = j - i + 2;
-
-                    SDL_FPoint* v = alloca(l1 * sizeof(SDL_FPoint));
-                    SDL_FPoint* v2 = alloca(l2 * sizeof(SDL_FPoint));
-
-                    v2[0] = intersect;
-                    for (int ix = 0; ix < i; ++ix) {
-                        v[ix] = p->points[ix];
-                    }
-                    for (int ix = i; ix < j; ++ix) {
-                        v2[ix - i + 1] = p->points[ix];
-                    }
-                    v2[j - i + 1] = intersect2; 
-                    v[i] = intersect;
-                    v[i + 1] = intersect2;
-                    for (int ix = j; ix < p->count; ++ix) {
-                        v[i + ix + 2 - j] = p->points[ix];
-                    }
-
-                     *a = Polygon_create(v, l1);
-                     *b = Polygon_create(v2, l2);
-
-                     SDL_FPoint diff = {(*a)->center.x - (*b)->center.x,
-                                        (*a)->center.y - (*b)->center.y};
-                     diff = normalized(diff);
-                     (*a)->vx = p->vx + 50.0f * diff.x;
-                     (*a)->vy = p->vy + 50.0f * diff.y;
-                     (*b)->vy = p->vx - 50.0f * diff.x;
-                     (*b)->vy = p->vy - 50.0f * diff.y;
-                     return true;
-                }
-                start2 = end2;
-            }
-
-        }
-        start = end;
-    }
-    return false;
-}
-
-
-SDL_FPoint rotated(SDL_FPoint p, double rad, SDL_FPoint center) {
-    SDL_FPoint pd = {p.x - center.x, p.y - center.y};
+b2Vec2 rotated(b2Vec2 p, double rad, b2Vec2 center) {
+    b2Vec2 pd = {p.x - center.x, p.y - center.y};
 
     double sina = SDL_sin(rad);
     double cosa = SDL_cos(rad);
@@ -301,7 +334,7 @@ SDL_FPoint rotated(SDL_FPoint p, double rad, SDL_FPoint center) {
 }
 
 
-float polygon_radius(const SDL_FPoint* points, int count, SDL_FPoint center) {
+/*float polygon_radius(const SDL_FPoint* points, int count, SDL_FPoint center) {
     float radius = 0.0;
     for (int i = 0; i < count; ++i) {
         float len_sqrd = (points[i].x - center.x) * (points[i].x - center.x) + 
@@ -325,28 +358,6 @@ SDL_FPoint polygon_center(const SDL_FPoint* points, int count) {
     p.y /= count;
     
     return p;
-}
-
-Polygon* Polygon_create(const SDL_FPoint* points, int n_points) {
-    Polygon* poly = SDL_malloc(sizeof(Polygon) + n_points * sizeof(SDL_FPoint));
-    SDL_assert_release(poly != NULL);
-
-
-    SDL_memcpy(poly->points, points, n_points * sizeof(SDL_FPoint));
-    poly->count = n_points;
-    poly->center = polygon_center(points, n_points);
-    poly->radius = polygon_radius(points, n_points, poly->center);
-    poly->mass = area(points, n_points);
-    poly->inertia = poly->mass * SDL_sqrtf(poly->mass) * 50.0f;
-    poly->vx = 0.0f;
-    poly->vy = 0.0f;
-    poly->vrot = 0.0f;
-
-    return poly;
-}
-
-void Polygon_free(Polygon* p) {
-    SDL_free(p);
 }
 
 
@@ -419,4 +430,4 @@ void Polygon_resolve_walls(Polygon* pol, float max_x, float max_y) {
             solve_wall_collision(pol, 0.0, max_y - pol->points[i].y, pol->points[i], 0.0, -.0);
         }
     }
-}
+}*/

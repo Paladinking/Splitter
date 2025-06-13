@@ -3,7 +3,7 @@ import pathlib
 import subprocess
 
 
-CLFLAGS="/DEBUG"
+CLFLAGS="/DEBUG /MD /W1"
 LINKFLAGS = ""
 
 BUILD_DIR = "build"
@@ -32,10 +32,10 @@ def main():
     sdl3 = find_package("SDL3")
     sdl3_image = find_package("SDL3_image")
     sdl3_ttf = find_package("SDL3_ttf")
-    sdl3_gfx = find_package("SDL3_gfx")
+    box2d = find_package("box2d")
 
     Executable("main.exe", "src/main.c", "src/polygon.c",
-               packages=[sdl3, sdl3_image, sdl3_ttf, sdl3_gfx])
+               packages=[sdl3, sdl3_image, sdl3_ttf, box2d])
 
     CopyToBin(*sdl3.dlls, *sdl3_image.dlls, *sdl3_ttf.dlls)
 

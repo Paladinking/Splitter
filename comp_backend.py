@@ -830,6 +830,28 @@ def set_backend(name: str) -> None:
     BACKEND = backend
     ACTIVE_BACKEND = name
 
+    run = True
+    if get_args().deffile:
+        run = False
+        args = get_args().deffile
+        dest = args[0]
+        with open(dest, 'w') as file:
+            print("EXPORTS", file=file)
+            for arg in args[1:]:
+                print(arg, file=file)
+        return
+
+    if get_args().copyto:
+        run = False
+        args = get_args().copyto
+        if len(args) != 2:
+            print("Invalid copyto args", file=sys.stderr)
+            exit(1)
+        shutil.copy2(args[0], args[1])
+
+    if not run:
+        exit(0)
+
     return
 
 def backend() -> Backend:
@@ -861,27 +883,6 @@ def get_make() -> Tuple[str, List[str]]:
     return make, args
 
 def build(comp_file: str) -> None:
-    run = True
-    if get_args().deffile:
-        run = False
-        args = get_args().deffile
-        dest = args[0]
-        with open(dest, 'w') as file:
-            print("EXPORTS", file=file)
-            for arg in args[1:]:
-                print(arg, file=file)
-        return
-
-    if get_args().copyto:
-        run = False
-        args = get_args().copyto
-        if len(args) != 2:
-            print("Invalid copyto args", file=sys.stderr)
-            exit(1)
-        shutil.copy2(args[0], args[1])
-
-    if not run:
-        return
 
     comp_stamp = os.path.getmtime(pathlib.Path(comp_file))
     compiledb = WORKDIR / 'compile_commands.json'
@@ -992,6 +993,29 @@ def build(comp_file: str) -> None:
         exit(res.returncode)
 
 
+def find_cmake() -> str:
+    cmake = shutil.which('cmake.exe')
+    if cmake is None:
+        raise RuntimeError("Could not find cmake.exe")
+    res = subprocess.run(['cmake', '--version'], stdout=subprocess.PIPE)
+    if res.returncode != 0:
+        raise RuntimeError("Bad cmake version")
+    ver = res.stdout.decode('utf8')
+    if not ver.startswith('cmake version '):
+        raise RuntimeError("Bad cmake version")
+    ver = ver[14:]
+    parts = ver.strip().split('.')
+    if len(parts) < 2:
+        raise RuntimeError("Bad cmake version")
+    try:
+        major = int(parts[0])
+        minor = int(parts[1])
+        if (major, minor) < (3, 22):
+            raise RuntimeError("Insufficient cmake version")
+    except Exception:
+        raise RuntimeError("Bad cmake version")
+    return cmake
+
 
 def _sdl3_gfx_hook(path: pathlib.Path, pkg: Dict[str, Any]) -> None:
     root = path / "SDL3_gfx-1.0.1"
@@ -1009,7 +1033,57 @@ def _sdl3_gfx_hook(path: pathlib.Path, pkg: Dict[str, Any]) -> None:
         shutil.copy2(p, include_gfx / p.name)
 
 
+def _box2d_hook(path: pathlib.Path, pkg: Dict[str, Any]) -> None:
+    src_path = path.with_name(path.name + "-src")
+    
+    if src_path.exists():
+        shutil.rmtree(src_path)
+    
+    shutil.move(path, src_path)
+
+    cmake_src_path = src_path / 'box2d-3.1.1'
+
+    build_dir = src_path / 'build'
+    cmake = find_cmake()
+
+    if BACKEND.name == "msvc":
+        cmp = "cl.exe"
+    else:
+        cmp = "gcc.exe"
+
+    res = subprocess.run([cmake, '-B', str(build_dir), '-S', str(cmake_src_path), '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
+                          f'-DCMAKE_INSTALL_PREFIX={path}', '-DBOX2D_SAMPLES=OFF', '-DBOX2D_UNIT_TESTS=OFF', '-DBUILD_SHARED_LIBS=OFF',
+                           f'-DCMAKE_C_COMPILER={cmp}'])
+    if res.returncode != 0:
+        raise RuntimeError("Failed building box2d")
+    res = subprocess.run([cmake, '--build', str(build_dir)])
+    if res.returncode != 0:
+        raise RuntimeError("Failed building box2d")
+    res = subprocess.run([cmake, '--install', str(build_dir)])
+    if res.returncode != 0:
+        raise RuntimeError("Failed building box2d")
+    shutil.rmtree(src_path)
+
+
 KNOWN_PACKAGES = {
+    "box2d": {
+        "msvc": {
+            "url": "https://github.com/erincatto/box2d/archive/refs/tags/v3.1.1.zip",
+            "include": ["include"],
+            "libpath": ["lib"],
+            "libname": ["box2d.lib"],
+            "dll": [],
+            "hook": _box2d_hook
+        },
+        "mingw": {
+            "url": "https://github.com/erincatto/box2d/archive/refs/tags/v3.1.1.zip",
+            "include": ["include"],
+            "libpath": ["lib"],
+            "libname": ["-lbox2d"],
+            "dll": [],
+            "hook": _box2d_hook
+        }
+    },
     "SDL3_gfx": {
         "msvc": {
             "url": "https://github.com/sabdul-khabir/SDL3_gfx/archive/refs/tags/v1.0.1.zip",
@@ -1107,13 +1181,13 @@ def find_package(package: str) -> Package:
         with zipfile.ZipFile(path, 'r') as zfile:
             zfile.extractall(pkg_path)
 
+        if "hook" in pkg:
+            pkg['hook'](pkg_path, pkg)
+
     includes = pkg['include']
     libpath = pkg['libpath']
     libname = pkg['libname']
     dll = pkg['dll']
-
-    if "hook" in pkg:
-        pkg['hook'](pkg_path, pkg)
 
     i_flags = ' '.join(BACKEND.include(str(pkg_path / i)) for i in includes)
     l_flags = ' '.join(BACKEND.libpath(str(pkg_path / l)) for l in libpath)
