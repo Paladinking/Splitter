@@ -95,43 +95,114 @@ bool Polygon_split(Polygon* p, b2WorldId world, b2Vec2 p1, b2Vec2 p2, Polygon** 
     return false;
 }
 
+// This is simplified version of b2ComputePolygonMass that works for more than B2_MAX_POLYGON_VERTICES points.
+b2Vec2 get_center_of_mass( const b2Vec2* points, int count, float density) {
+    b2Vec2 center = { 0.0f, 0.0f };
+    float area = 0.0f;
+    
+
+    // Get a reference point for forming triangles.
+    // Use the first vertex to reduce round-off errors.
+    b2Vec2 r = points[0];
+
+    const float inv3 = 1.0f / 3.0f;
+
+    for ( int i = 1; i < count - 1; ++i) {
+            // Triangle edges
+            b2Vec2 e1 = b2Sub(points[i], r );
+            b2Vec2 e2 = b2Sub(points[i + 1], r);
+
+            float D = b2Cross( e1, e2 );
+
+            float triangleArea = 0.5f * D;
+            area += triangleArea;
+
+            // Area weighted centroid, r at origin
+            center = b2MulAdd( center, triangleArea * inv3, b2Add( e1, e2 ) );
+    }
+    // Center of mass, shift back from origin at r
+    float invArea = 1.0f / area;
+    center.x = center.x * invArea + r.x;
+    center.y = center.y * invArea + r.y;
+    return center;
+}
+
+int needed_verts(int n_points) {
+    int count = n_points;
+    while (count > B2_MAX_POLYGON_VERTICES) {
+        n_points += 2;
+        count -= B2_MAX_POLYGON_VERTICES - 2;
+    }
+    return n_points;
+}
+
 
 Polygon* Polygon_create(b2WorldId world, const b2Vec2* points, int n_points, b2Transform t) {
-    b2Hull hull = b2ComputeHull(points, n_points);
-    if (hull.count == 0) {
-        return NULL;
-    }
-
-    b2Polygon dynPoly = b2MakePolygon(&hull, 0.0f);
-    b2MassData mass = b2ComputePolygonMass(&dynPoly, 1.0f);
-    if (mass.mass < 10.0f) {
-        return NULL;
-    }
-
+    b2Vec2 center = get_center_of_mass(points, n_points, 1.0f);
     Polygon* poly = SDL_malloc(sizeof(Polygon) + n_points * sizeof(b2Vec2));
     SDL_assert_release(poly != NULL);
+    SDL_memcpy(poly->points, points, n_points * sizeof(b2Vec2));
 
     for (int i = 0; i < n_points; ++i) {
-        dynPoly.vertices[i].x -= mass.center.x;
-        dynPoly.vertices[i].y -= mass.center.y;
+        poly->points[i].x -= center.x;
+        poly->points[i].y -= center.y;
     }
-
-    SDL_memcpy(poly->points, dynPoly.vertices, n_points * sizeof(b2Vec2));
-    poly->count = n_points;
 
     b2BodyDef bodyDef = b2DefaultBodyDef();
     bodyDef.type = b2_dynamicBody;
     bodyDef.position = t.p;
-    b2Vec2 center = b2RotateVector(t.q, mass.center);
-    bodyDef.position.x += center.x;
-    bodyDef.position.y += center.y;
+    b2Vec2 wold_center = b2RotateVector(t.q, center);
+
+    bodyDef.position.x += wold_center.x;
+    bodyDef.position.y += wold_center.y;
     bodyDef.rotation = t.q;
     b2BodyId body = b2CreateBody(world, &bodyDef);
+    poly->count = n_points;
 
-    b2ShapeDef shapeDef = b2DefaultShapeDef();
-    shapeDef.density = 1.0f;
+    int total_verts = 0;
+    if (n_points <= B2_MAX_POLYGON_VERTICES) {
+        b2Hull hull = b2ComputeHull(poly->points, n_points);
+        total_verts += hull.count;
+        if (hull.count != 0) {
+            b2Polygon dynPoly = b2MakePolygon(&hull, 0.0f);
+            b2ShapeDef shapeDef = b2DefaultShapeDef();
+            shapeDef.density = 1.0f;
+            b2CreatePolygonShape(body, &shapeDef, &dynPoly);
+        }
+    } else {
+        int tot_verts = needed_verts(n_points);
+        int parts = SDL_ceil((double)tot_verts / (double) B2_MAX_POLYGON_VERTICES);
+        int verts_per = tot_verts / parts;
+        int ix = 1;
+        for (int i = 0; i < parts; ++i) {
+            b2Vec2 verts[B2_MAX_POLYGON_VERTICES];
+            verts[0] = poly->points[0];
+            int part_count = verts_per;
+            if (i == parts - 1) {
+                part_count = tot_verts - verts_per * (parts - 1);
+            }
+            for (int j = 1; j < part_count; ++j) {
+                verts[j] = poly->points[ix];
+                ++ix;
+            }
+            --ix;
+            b2Hull hull = b2ComputeHull(verts, part_count);
+            total_verts += hull.count;
+            if (hull.count != 0) {
+                b2Polygon dynPoly = b2MakePolygon(&hull, 0.0f);
+                b2ShapeDef shapeDef = b2DefaultShapeDef();
+                shapeDef.density = 1.0f;
+                b2CreatePolygonShape(body, &shapeDef, &dynPoly);
+            }
+        }
+    }
 
-    b2CreatePolygonShape(body, &shapeDef, &dynPoly);
+    if (total_verts < n_points) {
+        SDL_free(poly);
+        b2DestroyBody(body);
+        return NULL;
+    }
+
     poly->body = body;
 
     return poly;

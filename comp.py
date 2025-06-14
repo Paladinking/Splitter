@@ -36,6 +36,8 @@ def main():
 
     Executable("main.exe", "src/main.c", "src/polygon.c",
                packages=[sdl3, sdl3_image, sdl3_ttf, box2d])
+    Executable("poly_test.exe", "src/poly_render.c",
+               packages=[sdl3, box2d])
 
     CopyToBin(*sdl3.dlls, *sdl3_image.dlls, *sdl3_ttf.dlls)
 

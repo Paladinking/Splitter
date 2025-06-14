@@ -101,7 +101,6 @@ void draw_solid_polygon(b2Transform t, const b2Vec2* vertices, int count, float 
 
 int main() {
     SDL_Init(SDL_INIT_VIDEO);
-    TTF_Init();
 
     SDL_Window* window;
     SDL_Renderer* renderer;
@@ -109,6 +108,10 @@ int main() {
     if (!SDL_CreateWindowAndRenderer("Polygon", 800, 800, 0, &window, &renderer)) {
         SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Failed creating window: %s\n", SDL_GetError());
     }
+
+    SDL_Texture* player_tex = IMG_LoadTexture(renderer, "assets/player.png");
+
+
 
     b2WorldDef worldDef = b2DefaultWorldDef();
     worldDef.gravity.y = 0.0f;
@@ -122,12 +125,14 @@ int main() {
 
     bool running = true;
 
+    b2Vec2 player = {40.0f, 40.0f};
+
 
     b2Vec2 points[5] = {{1.0f, 1.0f}, {1.0f, 20.0f}, {20.0f, 29.0f}, {45.0f, 10.0f}, {20.0f, 2.5f}};
     b2Transform t = {{60.0f, 60.0f}, {-1.0f, 0.0f}};
     Polygon* poly = Polygon_create(world, points, 5, t);
 
-    b2Vec2 points2[4] = {{40.0f, 20.0f}, {20.0f, 29.0f}, {35.0f, 10.0f}, {20.0f, 2.5f}};
+    b2Vec2 points2[4] = {{20.0f, 29.0f}, {20.0f, 2.5f}, {35.0f, 10.0f}, {40.0f, 20.0f}};
     t.p.x += 20.0f;
     t.p.y -= 25.0f;
 
@@ -145,6 +150,8 @@ int main() {
     uint64_t last_click = 0;
     bool click = false;
 
+    bool left = false, right = false, up = false, down = false;
+
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -155,6 +162,25 @@ int main() {
                 case SDL_EVENT_KEY_DOWN:
                     if (e.key.key == SDLK_ESCAPE) {
                         running = false;
+                    } else if (e.key.key == SDLK_W) {
+                        up = true;
+                    } else if (e.key.key == SDLK_S) {
+                        down = true;
+                    } else if (e.key.key == SDLK_A) {
+                        left = true;
+                    } else if (e.key.key == SDLK_D) {
+                        right = true;
+                    }
+                    break;
+                case SDL_EVENT_KEY_UP:
+                    if (e.key.key == SDLK_W) {
+                        up = false;
+                    } else if (e.key.key == SDLK_S) {
+                        down = false;
+                    } else if (e.key.key == SDLK_A) {
+                        left = false;
+                    } else if (e.key.key == SDLK_D) {
+                        right = false;
                     }
                     break;
                 case SDL_EVENT_MOUSE_WHEEL:
@@ -172,9 +198,27 @@ int main() {
 
             }
         }
+        b2Vec2 vel = {0.0f, 0.0f};
+        if (up) {
+            vel.y -= 1.0f;
+        } 
+        if (down) {
+            vel.y += 1.0f;
+        }
+        if (left) {
+            vel.x -= 1.0f;
+        } 
+        if (right) {
+            vel.x += 1.0f;
+        }
+        vel = b2Normalize(vel);
+
         uint64_t now = SDL_GetTicks();
         double delta = (now - stamp) / 1000.0;
         stamp = now;
+
+        player.x += vel.x * delta * 25.0f;
+        player.y += vel.y * delta * 25.0f;
 
         float mx, my;
         SDL_GetMouseState(&mx, &my);
@@ -231,6 +275,8 @@ int main() {
         bool collision = false;
 
 
+        b2World_Step(world, delta, 4);
+
         SDL_SetRenderDrawColor(gRenderer, 0x10, 0x10, 0x10, 0xff);
         SDL_RenderClear(gRenderer);
 
@@ -240,28 +286,27 @@ int main() {
             color.b = 200;
         }
 
-        b2World_Step(world, delta, 4);
-
         for (int i = 0; i < poly_count; ++i) {
             color.r += 10;
             color.b += 25;
             render_polygon(polygons[i], color);
         }
-        
+
         //b2World_Draw(world, &draw);
+        
+        SDL_FRect dest = {player.x * 10.0f - 20.0f, player.y * 10.0f - 20.0f, 40.0f, 40.0f};
+        SDL_RenderTexture(gRenderer, player_tex, NULL, &dest);
         
         SDL_SetRenderDrawColor(gRenderer, 0x80, 0x10, 0x10, 0xff);
         SDL_RenderLine(gRenderer, p1.x * 10.0f, p1.y * 10.0f, p2.x * 10.0f, p2.y * 10.0f);
         
-
-
-       //SDL_RenderGeometry(renderer, NULL, verts, 4, indicies, 6);
 
         SDL_RenderPresent(renderer);
     }
 
     b2DestroyWorld(world);
     
+    SDL_DestroyTexture(player_tex);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     
